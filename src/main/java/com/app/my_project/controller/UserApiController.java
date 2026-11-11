@@ -1,0 +1,237 @@
+package com.app.my_project.controller;
+
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import com.app.my_project.entity.UserEntity;
+import com.app.my_project.repository.UserRepsitory;
+
+import java.util.List;
+import java.util.Date;
+
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.PutMapping;
+
+import com.auth0.jwt.JWT;
+import com.auth0.jwt.algorithms.Algorithm;
+
+import io.github.cdimascio.dotenv.Dotenv;
+
+@RestController
+@RequestMapping("/api/users")
+public class UserApiController {
+    private final UserRepsitory userRepsitory;
+    private static final long EXPIRATION_TIME = 60 * 60 * 1000 * 24 * 7; // 7 day
+
+    public UserApiController(UserRepsitory userRepsitory) {
+        this.userRepsitory = userRepsitory;
+    }
+
+    @GetMapping
+    public List<UserEntity> getAllUsers() {
+        return userRepsitory.findAll();
+    }
+
+    @PostMapping
+    public UserEntity createUser(@RequestBody UserEntity user) {
+        return userRepsitory.save(user);
+    }
+
+    @GetMapping("/{id}")
+    public UserEntity getUserById(@PathVariable Long id) {
+        return userRepsitory.findById(id).orElse(null);
+    }
+
+    @PutMapping("/{id}")
+    public UserEntity updateUser(@PathVariable Long id, @RequestBody UserEntity user) {
+        UserEntity userToUpdate = userRepsitory.findById(id).orElse(null);
+        if (userToUpdate == null) {
+            throw new IllegalArgumentException("User note found");
+
+        }
+        userToUpdate.setUsername(user.getUsername());
+        userToUpdate.setEmail(user.getEmail());
+        userRepsitory.save(userToUpdate);
+
+        return userRepsitory.save(userToUpdate);
+
+    }
+
+    @DeleteMapping("/{id}")
+    public void deleteUser(@PathVariable Long id) {
+        userRepsitory.deleteById(id);
+    }
+
+    @PostMapping("/signin")
+    public UserEntity signin(@RequestBody UserEntity user) {
+        String username = user.getUsername();
+        String email = user.getEmail();
+
+        UserEntity userToSignin = userRepsitory.findByUsernameAndEmail(username, email);
+
+        if (userToSignin == null) {
+            throw new IllegalArgumentException("user not found");
+        }
+        return userToSignin;
+    }
+
+    public String getSecreat() {
+        Dotenv dotenv = Dotenv.configure()
+                .directory(System.getProperty("user.dir"))
+                .load();
+        return dotenv.get("JWT_SECRET");
+    }
+
+    private Algorithm getAlgorithm() {
+        return Algorithm.HMAC256(getSecreat());
+    }
+
+    @PostMapping("/admin-signin")
+    public String adminSingin(@RequestBody UserEntity user) {
+        try {
+            String u = user.getUsername();
+            String p = user.getPassword();
+
+            UserEntity userForCreateToken = userRepsitory.findByUsernameAndPassword(u, p);
+            if (userForCreateToken == null) {
+                throw new IllegalArgumentException("Invalid username or password");
+            }
+
+            return JWT.create()
+                    .withSubject(String.valueOf(userForCreateToken.getId()))
+                    .withExpiresAt(new Date(System.currentTimeMillis() + EXPIRATION_TIME))
+                    .withIssuedAt(new Date())
+                    .sign(getAlgorithm());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Error creating token");
+        }
+
+    }
+
+    @GetMapping("/admin-info")
+    public Object adminInfo(@RequestHeader("Authorization") String token) {
+        try {
+            if (token == null || !token.startsWith("Bearer ")) {
+                throw new IllegalArgumentException("Invalid token format with 'Bearer '");
+            }
+
+            String tokenWithoutBearer = token.replace("Bearer ", "");
+
+            if (tokenWithoutBearer.trim().isEmpty()) {
+                throw new IllegalArgumentException("Token is empty");
+            }
+
+            String subject = JWT.require(getAlgorithm())
+                    .build()
+                    .verify(tokenWithoutBearer)
+                    .getSubject();
+
+            Long userId = Long.valueOf(subject);
+            UserEntity user = userRepsitory.findById(userId).orElse(null);
+
+            if (user == null)
+                throw new IllegalArgumentException("user not found");
+
+            record UserResponse(Long id, String username, String email) {
+            }
+
+            return new UserResponse(user.getId(), user.getUsername(), user.getEmail());
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Authorization error: " + e.getMessage());
+        }
+    }
+
+    public Long getUserIdFromToken(String token) {
+        String tokenWithoutBearer = token.replace("Bearer ", "");
+
+        if (tokenWithoutBearer.trim().isEmpty()) {
+            throw new IllegalArgumentException("Token is empty");
+        }
+
+        return Long.valueOf(
+                JWT.require(getAlgorithm())
+                        .build()
+                        .verify(tokenWithoutBearer)
+                        .getSubject());
+    }
+
+    @PostMapping("/admin-edit-profile")
+    public UserEntity adminEditProfile(
+            @RequestHeader("Authorization") String token,
+            @RequestBody UserEntity user) {
+
+        try {
+
+            // ตรวจสอบ token and get id from token
+            if (token == null || !token.startsWith("Bearer ")) {
+                throw new IllegalArgumentException("Invalid token format with 'Bearer '");
+            }
+
+            Long authUserId = getUserIdFromToken(token);
+
+            UserEntity userToUpdate = userRepsitory.findById(authUserId)
+                    .orElse(null);
+
+            if (userToUpdate == null) {
+                throw new IllegalArgumentException("User not found");
+            }
+
+            userToUpdate.setEmail(user.getEmail());
+            userToUpdate.setUsername(user.getUsername());
+            userToUpdate.setRole(user.getRole());
+
+            if (user.getPassword() != null &&
+                    !user.getPassword().isEmpty()) {
+
+                userToUpdate.setPassword(user.getPassword());
+            }
+
+            return userRepsitory.save(userToUpdate);
+
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "Update user error: " + e.getMessage());
+        }
+    }
+
+    @PostMapping("/admin-create")
+    public UserEntity adminCreate(
+            @RequestHeader("Authorization") String token,
+            @RequestBody UserEntity user) {
+        try {
+            userRepsitory.save(user);
+            return user;
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Authentication error " + e.getMessage());
+        }
+    }
+
+    @DeleteMapping("/admin-delete/{id}")
+    public void adminDelete(@RequestHeader("Authorization") String token, @PathVariable Long id) {
+        try {
+            UserEntity userToDelete = userRepsitory.findById(id).orElse(null);
+
+            if (userToDelete == null)
+                throw new IllegalArgumentException("User not found");
+
+            userRepsitory.deleteById(id);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Authentication error " + e.getMessage());
+        }
+    }
+
+}
+
+// @PathVariable ใช้สำหรับรับค่าจาก URL เช่น /api/users/{id} จะรับค่า id จาก URL
+// และนำไปใช้ในเมธอด
+// @RequestBody ใช้สำหรับรับค่าจาก body ของ HTTP request เช่น
+// ในการสร้างหรืออัพเดตข้อมูลผู้ใช้ จะรับข้อมูลจาก body และแปลงเป็น UserEntity
+// @RequestParam ใช้สำหรับรับค่าจาก query parameters เช่น
+// /api/users?username=John จะรับค่า username จาก query parameters
+// และนำไปใช้ในเมธอด
